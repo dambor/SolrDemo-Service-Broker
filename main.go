@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"net/http"
 
 	"github.com/cloudfoundry-community/go-cfenv"
 	"github.com/cloudfoundry-community/types-cf"
@@ -27,9 +28,24 @@ type serviceBindingResponse struct {
 	SyslogDrainURL string                 `json:"syslog_drain_url,omitempty"`
 }
 
-var serviceName, servicePlan, baseGUID, authUser, authPassword, tags, imageURL string
-var serviceBinding serviceBindingResponse
-var appURL string
+type ServiceCreationRequest struct {
+	InstanceID       string            `json:"-"`
+	ServiceID        string            `json:"service_id"`
+	PlanID           string            `json:"plan_id"`
+	OrganizationGUID string            `json:"organization_guid"`
+	SpaceGUID        string            `json:"space_guid"`
+	Parameters       map[string]string `json:parameters`
+}
+
+var solrConfigSetName, solrEndPoint, serviceName, servicePlan, baseGUID, authUser, authPassword, tags, imageURL string
+var defaultServiceBinding serviceBindingResponse
+var credentials string
+
+var appURL              string
+var parameterMap        map[string]string
+var instanceCollections map[string]string
+var collectionName      string
+var serviceCreationRequest ServiceCreationRequest
 
 func brokerCatalog() (int, []byte) {
 	tagArray := []string{}
@@ -37,7 +53,7 @@ func brokerCatalog() (int, []byte) {
 		tagArray = strings.Split(tags, ",")
 	}
 	var requires []string
-	if len(serviceBinding.SyslogDrainURL) > 0 {
+	if len(defaultServiceBinding.SyslogDrainURL) > 0 {
 		requires = []string{"syslog_drain"}
 	}
 	catalog := cf.Catalog{
@@ -73,9 +89,28 @@ func brokerCatalog() (int, []byte) {
 	return 200, json
 }
 
-func createServiceInstance(params martini.Params) (int, []byte) {
+func createServiceInstance(r *http.Request, params martini.Params) (int, []byte) {
 	serviceID := params["service_id"]
-	fmt.Printf("Creating service instance %s for service %s plan %s\n", serviceID, serviceName, servicePlan)
+
+	
+    decoder := json.NewDecoder(r.Body) 
+
+    err := decoder.Decode(&serviceCreationRequest)
+	
+	
+
+
+		fmt.Println("what cloud controller passes to us: ")
+		fmt.Printf("%# v\n", pretty.Formatter(serviceCreationRequest))
+		//return 500, []byte{}
+	
+
+	collectionName = serviceCreationRequest.Parameters["collection"]
+	fmt.Printf("Collection is %s for Request %s \n", collectionName, r,  )
+	//err := json.UnMarshal(params["parameters"], parameterMap)
+	//collectionName = parameterMap["collection"]
+	//solrEndPoint  = defaultServiceBinding.Credentials["SolrEndpoint"].(string)
+	fmt.Printf("Creating service instance %s for service %s plan %s\n", serviceID, serviceName, servicePlan, )
 
 	instance := serviceInstanceResponse{DashboardURL: fmt.Sprintf("%s/dashboard", appURL)}
 	json, err := json.Marshal(instance)
@@ -84,22 +119,58 @@ func createServiceInstance(params martini.Params) (int, []byte) {
 		fmt.Printf("%# v\n", pretty.Formatter(instance))
 		return 500, []byte{}
 	}
+    
+
+	  //  res, err := http.Get(solrEndPoint + "/admin/collections?action=CREATE&name=" + collectionName + "&numShards=2&replicationFactor=2&maxShardsPerNode=4&collection.configName=" + solrConfigSetName)
+
+    if err != nil {
+        log.Fatal(err)
+    }
+
+   // createCollection, err := ioutil.ReadAll(res.Body)
+
+    //res.Body.Close()
+    if err != nil {
+    	log.Fatal(err)
+    }
+   // fmt.Printf("%s", createCollection)
+    instanceCollections[serviceID] = collectionName
 	return 201, json
 }
 
 func deleteServiceInstance(params martini.Params) (int, string) {
-	serviceID := params["service_id"]
+	serviceID := params["serviceID"]
 	fmt.Printf("Deleting service instance %s for service %s plan %s\n", serviceID, serviceName, servicePlan)
 	return 200, "{}"
 }
 
 func createServiceBinding(params martini.Params) (int, []byte) {
+	var serviceBinding serviceBindingResponse
+
 	serviceID := params["service_id"]
 	serviceBindingID := params["binding_id"]
 	fmt.Printf("Creating service binding %s for service %s plan %s instance %s\n",
 		serviceBindingID, serviceName, servicePlan, serviceID)
 
+    
+
+    json.Unmarshal([]byte(credentials), &serviceBinding.Credentials)
+	//serviceBinding := defaultServiceBinding 
+	//delete (serviceBinding.Credentials, "SolrEndpoint");
+
+	fmt.Println("this is the before binding response")
+	//json.Unmarshal([]byte(credentials), &serviceBinding.Credentials)
+	fmt.Printf("%# v\n", pretty.Formatter(serviceBinding))
+
+	serviceBinding.Credentials["SolrEndpoint"] = serviceBinding.Credentials["SolrEndpoint"].(string) + "/" + instanceCollections[serviceID] 
+	
+     fmt.Println("this is the after binding response")
+	//json.Unmarshal([]byte(credentials), &serviceBinding.Credentials)
+	fmt.Printf("%# v\n", pretty.Formatter(serviceBinding))
+
+
 	json, err := json.Marshal(serviceBinding)
+
 	if err != nil {
 		fmt.Println("Um, how did we fail to marshal this binding:")
 		fmt.Printf("%# v\n", pretty.Formatter(serviceBinding))
@@ -110,6 +181,7 @@ func createServiceBinding(params martini.Params) (int, []byte) {
 
 func deleteServiceBinding(params martini.Params) (int, string) {
 	serviceID := params["service_id"]
+
 	serviceBindingID := params["binding_id"]
 	fmt.Printf("Delete service binding %s for service %s plan %s instance %s\n",
 		serviceBindingID, serviceName, servicePlan, serviceID)
@@ -118,10 +190,12 @@ func deleteServiceBinding(params martini.Params) (int, string) {
 
 func showServiceInstanceDashboard(params martini.Params) (int, string) {
 	fmt.Printf("Show dashboard for service %s plan %s\n", serviceName, servicePlan)
-	return 200, "Dashboard"
+	return 200, "<a href=\"http://dashboard.app.mgpcf.net/dashboard.html\"> Dashboard </a>"
 }
 
 func main() {
+
+    instanceCollections  = make (map[string]string,100)
 	m := martini.Classic()
 
 	baseGUID = os.Getenv("BASE_GUID")
@@ -137,6 +211,11 @@ func main() {
 		servicePlan = "shared"
 	}
 
+	 solrConfigSetName = os.Getenv("SOLR_CONFIG_SET")
+    if solrConfigSetName == "" {
+       solrConfigSetName = "logstash_conf"
+    }
+
 	authUser = os.Getenv("AUTH_USER")
 	authPassword = os.Getenv("AUTH_PASSWORD")
 	if (authUser != "") && (authPassword != "") {
@@ -144,17 +223,19 @@ func main() {
 		m.Use(auth.Basic(authUser, authPassword))
 	}
 
-	serviceBinding.SyslogDrainURL = os.Getenv("SYSLOG_DRAIN_URL")
-
-	credentials := os.Getenv("CREDENTIALS")
+	credentials = os.Getenv("CREDENTIALS")
 	if credentials == "" {
 		credentials = "{\"port\": \"4000\"}"
 	}
 	tags = os.Getenv("TAGS")
 	imageURL = os.Getenv("IMAGE_URL")
 
-	json.Unmarshal([]byte(credentials), &serviceBinding.Credentials)
-	fmt.Printf("%# v\n", pretty.Formatter(serviceBinding))
+	json.Unmarshal([]byte(credentials), &defaultServiceBinding.Credentials)
+	fmt.Printf("%# v\n", pretty.Formatter(defaultServiceBinding))
+
+
+	defaultServiceBinding.SyslogDrainURL = os.Getenv("SYSLOG_DRAIN_URL")
+
 
 	appEnv, err := cfenv.Current()
 	if err == nil {
